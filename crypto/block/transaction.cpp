@@ -2041,17 +2041,12 @@ bool Transaction::prepare_action_phase(const ActionPhaseConfig& cfg) {
   ap.action_fine = td::zero_refint();
 
   td::Ref<vm::Cell> old_code = new_code, old_data = new_data, old_library = new_library;
-  // 1 - ok, 0 - limits exceeded, -1 - fatal error
-  auto enforce_state_limits = [&]() -> int {
+  auto enforce_state_limits = [&]() {
     if (account.is_special) {
-      return 1;
+      return true;
     }
     auto S = check_state_limits(cfg.size_limits);
     if (S.is_error()) {
-      if (S.code() != AccountStorageStat::errorcode_limits_exceeded) {
-        LOG(ERROR) << "Account storage stat error: " << S.move_as_error();
-        return -1;
-      }
       // Rollback changes to state, fail action phase
       LOG(INFO) << "Account state size exceeded limits: " << S.move_as_error();
       new_account_storage_stat = {};
@@ -2060,9 +2055,9 @@ bool Transaction::prepare_action_phase(const ActionPhaseConfig& cfg) {
       new_library = old_library;
       ap.result_code = 50;
       ap.state_exceeds_limits = true;
-      return 0;
+      return false;
     }
-    return 1;
+    return true;
   };
 
   int n = 0;
@@ -2173,9 +2168,7 @@ bool Transaction::prepare_action_phase(const ActionPhaseConfig& cfg) {
       }
       LOG(DEBUG) << "invalid action " << ap.result_arg << " in action list: error code " << ap.result_code;
       // This is required here because changes to libraries are applied even if action phase fails
-      if (enforce_state_limits() == -1) {
-        return false;
-      }
+      enforce_state_limits();
       if (cfg.action_fine_enabled) {
         ap.action_fine = std::min(ap.action_fine, balance.grams);
         ap.total_action_fees = ap.action_fine;
@@ -2197,11 +2190,7 @@ bool Transaction::prepare_action_phase(const ActionPhaseConfig& cfg) {
     new_code = ap.new_code;
   }
   new_data = compute_phase->new_data;  // tentative persistent data update applied
-  int res = enforce_state_limits();
-  if (res == -1) {
-    return false;
-  }
-  if (res == 0) {
+  if (!enforce_state_limits()) {
     if (cfg.extra_currency_v2) {
       end_lt = ap.end_lt = start_lt + 1;
       if (cfg.action_fine_enabled) {
@@ -3179,8 +3168,7 @@ static td::uint32 get_public_libraries_diff_count(const td::Ref<vm::Cell>& old_l
  *
  * @returns A `td::Status` indicating the result of the check.
  *          - If the state limits are within the allowed range, returns OK.
- *          - If the state limits exceed the maximum allowed range, returns an error with AccountStorageStat::errorcode_limits_exceeded code.
- *          - If an error occurred during storage stat calculation, returns other error.
+ *          - If the state limits exceed the maximum allowed range, returns an error.
  */
 td::Status Transaction::check_state_limits(const SizeLimitsConfig& size_limits, bool is_account_stat) {
   auto cell_equal = [](const td::Ref<vm::Cell>& a, const td::Ref<vm::Cell>& b) -> bool {
@@ -3215,8 +3203,7 @@ td::Status Transaction::check_state_limits(const SizeLimitsConfig& size_limits, 
 
   if (storage_stat.get_total_cells() > size_limits.max_acc_state_cells ||
       storage_stat.get_total_bits() > size_limits.max_acc_state_bits) {
-    return td::Status::Error(AccountStorageStat::errorcode_limits_exceeded,
-                             PSTRING() << "account state is too big: cells=" << storage_stat.get_total_cells()
+    return td::Status::Error(PSTRING() << "account state is too big: cells=" << storage_stat.get_total_cells()
                                        << ", bits=" << storage_stat.get_total_bits()
                                        << " (max cells=" << size_limits.max_acc_state_cells
                                        << ", max bits=" << size_limits.max_acc_state_bits << ")");
@@ -3224,8 +3211,7 @@ td::Status Transaction::check_state_limits(const SizeLimitsConfig& size_limits, 
   if (account.is_masterchain() && !cell_equal(account.library, new_library)) {
     auto libraries_count = get_public_libraries_count(new_library);
     if (libraries_count > size_limits.max_acc_public_libraries) {
-      return td::Status::Error(AccountStorageStat::errorcode_limits_exceeded,
-                               PSTRING() << "too many public libraries: " << libraries_count << " (max "
+      return td::Status::Error(PSTRING() << "too many public libraries: " << libraries_count << " (max "
                                          << size_limits.max_acc_public_libraries << ")");
     }
   }
